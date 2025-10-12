@@ -49,11 +49,31 @@ pip install -r requirements.txt
 
 #### **5. รันเซิร์ฟเวอร์**
 
-หลังจากติดตั้งทุกอย่างเรียบร้อยแล้ว ให้รันเซิร์ฟเวอร์ Node.js
+คุณสามารถรันเซิร์ฟเวอร์ได้ 2 วิธี:
 
-```bash
-node app.js
-```
+  * **สำหรับ Development (โหมดพัฒนา):**
+    ใช้ `node` เพื่อรันเซิร์ฟเวอร์โดยตรง เหมาะสำหรับการแก้ไขและทดสอบโค้ด
+
+    ```bash
+    node app.js
+    ```
+
+  * **สำหรับ Production (ใช้งานจริง) ด้วย PM2:**
+    **PM2** คือ Process Manager ที่ช่วยให้แอปพลิเคชันของคุณทำงานอยู่ตลอดเวลา (auto-restart) และจัดการทรัพยากรได้ดีขึ้น
+
+    1.  **ติดตั้ง PM2 (หากยังไม่มี):**
+        ```bash
+        npm install pm2 -g
+        ```
+    2.  **เริ่มการทำงานด้วย PM2:**
+        ```bash
+        pm2 start app.js --name "planforge-api"
+        ```
+    3.  **คำสั่ง PM2 ที่ใช้บ่อย:**
+          * ดูสถานะทุกโปรเซส: `pm2 list`
+          * ดู Log: `pm2 logs planforge-api`
+          * หยุดการทำงาน: `pm2 stop planforge-api`
+          * รีสตาร์ท: `pm2 restart planforge-api`
 
 -----
 
