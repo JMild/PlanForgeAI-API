@@ -5,7 +5,23 @@ module.exports = (db) => {
 
   // Orders
   router.get('/', (req, res) => {
-    db.all('SELECT * FROM orders', [], (err, rows) => {
+    db.all( `SELECT
+      o.*,
+      COALESCE(oi.item_count, 0)        AS item_count,
+      COALESCE(oa.attachment_count, 0)  AS attachment_count
+    FROM "orders" o
+    LEFT JOIN (
+      SELECT order_no, COUNT(*) AS item_count
+      FROM "order_items"
+      GROUP BY order_no
+    ) oi USING (order_no)
+    LEFT JOIN (
+      SELECT order_no, COUNT(*) AS attachment_count
+      FROM "order_attachments"
+      GROUP BY order_no
+    ) oa USING (order_no)
+    ORDER BY o.order_no;
+    `, [], (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(rows);
     });
@@ -18,6 +34,17 @@ module.exports = (db) => {
       return res.status(400).json({ error: "Missing order_no query parameter" });
     }
     db.all('SELECT * FROM order_items WHERE order_no = ?', [order_no], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
+  });
+  
+  router.get('/attachments', (req, res) => {
+    const { order_no } = req.query;
+    if (!order_no) {
+      return res.status(400).json({ error: "Missing order_no query parameter" });
+    }
+    db.all('SELECT * FROM order_attachments WHERE order_no = ?', [order_no], (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(rows);
     });

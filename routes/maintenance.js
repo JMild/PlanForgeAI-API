@@ -31,8 +31,8 @@ module.exports = (db) => {
         spareParts: ['Lubricant Oil', 'Cleaning Supplies'],
         workCenter: 'WC001',
         checklist: [
-          { id: 'c1', task: 'Check oil levels', completed: false },
-          { id: 'c2', task: 'Lubricate bearings', completed: false },
+          { id: 'c1', task: 'Check oil levels', completed: true },
+          { id: 'c2', task: 'Lubricate bearings', completed: true },
           { id: 'c3', task: 'Inspect belts and chains', completed: false },
           { id: 'c4', task: 'Clean coolant system', completed: false },
           { id: 'c5', task: 'Check alignment', completed: false },

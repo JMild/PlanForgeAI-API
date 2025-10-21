@@ -83,7 +83,7 @@ module.exports = (db) => {
   });
 
   router.get('/machines_processes', (req, res) => {
-    db.all('SELECT * FROM machines_processes', [], (err, rows) => {
+    db.all('SELECT * FROM machine_processes', [], (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(rows);
     });
@@ -160,6 +160,12 @@ module.exports = (db) => {
       res.json(rows);
     });
   });
+  router.get('/materials-dropdown', (req, res) => {
+    db.all('SELECT material_code, material_name FROM materials', [], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
+  });
 
   // ====== Work Centers ======
   router.get('/work_centers', (req, res) => {
@@ -185,14 +191,7 @@ module.exports = (db) => {
       res.json(rows);
     });
   });
-  
-  // ====== Products ======
-  router.get('/materials', (req, res) => {
-    db.all('SELECT * FROM materials', [], (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(rows);
-    });
-  });
+
   
   // ====== Routing ======
   router.get('/routings', (req, res) => {

@@ -36,74 +36,79 @@ module.exports = (db) => {
   });
 
   // ===== Core (JSON-only) =====
-  router.post('/plan', async (req, res) => {
+  router.post("/plan", async (req, res) => {
     const raw = req.body || {};
     const payload = raw.engine_v1 || raw.full || raw;
 
-    // validate input
-    const must = ['process_defs', 'product_defs', 'machines', 'calendar'];
+    const must = ["process_defs", "product_defs", "machines", "calendar"];
     const missing = must.filter((k) => !payload || !payload[k]);
     if (missing.length) {
       return res.status(400).json({
         ok: false,
-        error: 'bad_input',
-        detail: `missing keys: ${missing.join(', ')}`,
-        hint: 'ส่ง schema ตรง หรือหุ้มด้วย {engine_v1:{...}} / {full:{...}}',
+        error: "bad_input",
+        detail: `missing keys: ${missing.join(", ")}`,
+        hint: "ส่ง schema ตรง หรือหุ้มด้วย {engine_v1:{...}} / {full:{...}}",
       });
     }
 
-    const day0 = (req.query.day0 || raw.day0 || '2025-09-22').toString();
+    const day0 = (req.query.day0 || raw.day0 || "2025-09-22").toString();
     const jobId = randomUUID();
 
     if (!fs.existsSync(ENGINE_PY)) {
-      return res.status(500).json({ ok: false, error: 'engine_not_found', detail: ENGINE_PY });
+      return res
+        .status(500)
+        .json({ ok: false, error: "engine_not_found", detail: ENGINE_PY });
     }
 
     try {
       const py = pickPython();
-      const args = [ENGINE_PY, '--day0', day0, '--stdin']; // เพิ่ม flag เพื่อให้ engine อ่านจาก stdin
+
+      // ✅ ใช้ stdin อย่างเดียว
+      // (ถ้าจะใช้ --input - ก็เปลี่ยนเป็น ["--day0", day0, "--input", "-"] ได้เช่นกัน)
+      const args = [ENGINE_PY, "--day0", day0, "--stdin"];
 
       const proc = spawn(py, args, {
         cwd: path.dirname(ENGINE_PY),
         env: process.env,
-        shell: process.platform === 'win32',
+        shell: process.platform === "win32",
       });
 
-      let stdout = '';
-      let stderr = '';
+      let stdout = "";
+      let stderr = "";
 
       const KILL_MS = Number(process.env.AI_PLAN_TIMEOUT_MS || 5 * 60 * 1000);
       const killer = setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch {}
+        try {
+          proc.kill("SIGKILL");
+        } catch {}
       }, KILL_MS);
 
-      proc.stdout.on('data', (d) => (stdout += d.toString()));
-      proc.stderr.on('data', (d) => (stderr += d.toString()));
+      proc.stdout.on("data", (d) => (stdout += d.toString()));
+      proc.stderr.on("data", (d) => (stderr += d.toString()));
 
-      proc.on('error', (err) => {
+      proc.on("error", (err) => {
         clearTimeout(killer);
-        try { proc.kill('SIGKILL'); } catch {}
+        try {
+          proc.kill("SIGKILL");
+        } catch {}
         return res.status(500).json({
           ok: false,
-          error: 'spawn_error',
+          error: "spawn_error",
           detail: String(err),
-          hint: 'เช็ค PYTHON command / dependency',
+          hint: "เช็ค PYTHON command / dependency",
         });
       });
 
-      proc.on('close', (code) => {
+      proc.on("close", (code) => {
         clearTimeout(killer);
 
         if (code !== 0) {
-          console.error('engine stderr:\n', stderr);
-          return res.status(500).json({
-            ok: false,
-            error: 'engine_failed',
-            detail: stderr || stdout,
-          });
+          console.error("engine stderr:\n", stderr);
+          return res
+            .status(500)
+            .json({ ok: false, error: "engine_failed", detail: stderr || stdout });
         }
 
-        // พยายาม parse stdout เป็น JSON
         let result = null;
         try {
           result = JSON.parse(stdout);
@@ -113,20 +118,21 @@ module.exports = (db) => {
 
         return res.json({
           ok: true,
-          mode: 'stream',
+          mode: "stdin",
           jobId,
           day0,
           result,
         });
       });
 
-      // ส่ง payload เข้า stdin แล้วปิด
+      // ✅ ส่ง payload เข้า stdin แล้วปิด
       proc.stdin.write(JSON.stringify(payload));
       proc.stdin.end();
-
     } catch (err) {
       console.error(err);
-      return res.status(500).json({ ok: false, error: 'server_error', detail: String(err) });
+      return res
+        .status(500)
+        .json({ ok: false, error: "server_error", detail: String(err) });
     }
   });
 
