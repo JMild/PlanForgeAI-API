@@ -1,234 +1,199 @@
 {
   "schema_version": "2.0.0",
   "timezone": "Asia/Bangkok",
-  "generated_at": "2025-10-14T21:00:00",
-
   "calendar": {
-    "holidays": ["2025-01-01"],
-    "ot_windows": [
-      {"start": "2025-10-18T17:00:00", "end": "2025-10-18T19:00:00"},
-      {"start": "2025-10-18T20:00:00", "end": "2025-10-18T22:00:00"}
-    ],
-    "ot_cap_hours_per_day": 2,
-    "machine_maintenances": [
-      {"machine_id": "M_CUT_1", "start": "2025-10-14T12:00:00", "end": "2025-10-14T16:00:00"}
+    "holidays": [],
+    "machine_maintenances": [],
+    "breaks": [["12:00","13:00"], ["15:00","15:15"]],
+    "shifts": [
+      { "start": "08:00", "end": "16:00" },
+      { "start": "16:00", "end": "24:00" }
     ]
   },
-
   "orders": [
     {
       "order_id": "ORD001",
-      "due_date": "2025-10-20T17:00:00",
-      "release_date": "2025-10-15T08:00:00",
+      "release_date": "2025-10-01T08:00:00",
+      "due_date": "2025-10-03T17:00:00",
       "priority": 1,
       "lines": [
-        {"product_id": "P001", "quantity": 120, "priority": 1}
+        { "product_id": "P_A", "quantity": 100 },
+        { "product_id": "P_B", "quantity": 50 }
+      ]
+    },
+    {
+      "order_id": "ORD002",
+      "release_date": "2025-10-01T08:00:00",
+      "due_date": "2025-10-02T17:00:00",
+      "priority": 2,
+      "lines": [
+        { "product_id": "P_C", "quantity": 75 }
+      ]
+    },
+    {
+      "order_id": "ORD003",
+      "release_date": "2025-10-01T08:00:00",
+      "due_date": "2025-10-04T17:00:00",
+      "priority": 1,
+      "lines": [
+        { "product_id": "P_D", "quantity": 200 }
       ]
     }
   ],
-
   "products": [
-    {
-      "product_id": "P001",
-      "name": "Widget A",
-      "routing_id": "R001",
-      "bom_id": "B001",
-      "lot_size": 20
-    }
+    { "product_id": "P_A", "name": "Widget A", "routing_id": "R_A", "lot_size": 100 },
+    { "product_id": "P_B", "name": "Widget B", "routing_id": "R_B", "lot_size": 50 },
+    { "product_id": "P_C", "name": "Widget C", "routing_id": "R_C", "lot_size": 75 },
+    { "product_id": "P_D", "name": "Widget D", "routing_id": "R_D", "lot_size": 200 }
   ],
-
-  "boms": [
-    {
-      "bom_id": "B001",
-      "items": [
-        {"material_id": "MAT_A", "qty_per_unit": 1.5},
-        {"product_id": "P002", "qty_per_unit": 0.2}
-      ]
-    }
-  ],
-
-  "materials": [
-    {
-      "material_id": "MAT_A",
-      "uom": "kg",
-      "on_hand": 300,
-      "safety_stock": 50,
-      "deliveries": [
-        {"eta": "2025-10-18T08:00:00", "qty": 150}
-      ]
-    }
-  ],
-
   "work_centers": [
-    {
-      "work_center_id": "WC_CUT",
-      "name": "Cutting Center",
-      "type": "CUTTING",
-      "parallel_machines": ["M_CUT_1", "M_CUT_2"],
-      "setup_matrix_id": "SETUP_MATRIX_CUT",
-      "default_setup_min": 8,
-      "setup_requires_operator": true,
-      "run_requires_operator": false
-    },
-    {
-      "work_center_id": "WC_PAINT",
-      "name": "Painting Center",
-      "type": "PAINTING",
-      "parallel_machines": ["M_PAINT_1"],
-      "setup_matrix_id": "SETUP_MATRIX_PAINT",
-      "default_setup_min": 10,
-      "setup_requires_operator": true,
-      "run_requires_operator": true
-    }
+    { "work_center_id": "WC_MACH", "name": "Machining", "parallel_machines": ["M001", "M002"] },
+    { "work_center_id": "WC_ASSY", "name": "Assembly", "parallel_machines": ["M003"] },
+    { "work_center_id": "WC_PRESS", "name": "Pressing", "parallel_machines": ["M004"] },
+    { "work_center_id": "WC_FIN",  "name": "Finishing", "parallel_machines": ["M005"] }
   ],
-
   "machines": [
-    {
-      "machine_id": "M_CUT_1",
-      "work_center_id": "WC_CUT",
-      "capacity": 1,
-      "efficiency": 0.95,
-      "initial_state": "clean",
-      "run_unattended": true,
-      "requires_operator_for_run": false,
-      "shifts": ["S1", "S2"]
-    },
-    {
-      "machine_id": "M_CUT_2",
-      "work_center_id": "WC_CUT",
-      "capacity": 1,
-      "efficiency": 0.92,
-      "initial_state": "clean",
-      "run_unattended": true,
-      "requires_operator_for_run": false,
-      "shifts": ["S1", "S2"]
-    },
-    {
-      "machine_id": "M_PAINT_1",
-      "work_center_id": "WC_PAINT",
-      "capacity": 1,
-      "efficiency": 0.9,
-      "initial_state": "clean",
-      "run_unattended": false,
-      "requires_operator_for_run": true,
-      "shifts": ["S1"]
-    }
-  ],
-
-  "shifts": [
-    {
-      "shift_id": "S1",
-      "name": "Day",
-      "start_time": "08:00",
-      "end_time": "17:00",
-      "breaks": [{"start": "12:00", "end": "13:00"}]
-    },
-    {
-      "shift_id": "S2",
-      "name": "Evening",
-      "start_time": "17:00",
-      "end_time": "01:00",
-      "breaks": [{"start": "21:00", "end": "21:30"}]
-    },
-    {
-      "shift_id": "S3",
-      "name": "Night",
-      "start_time": "01:00",
-      "end_time": "08:00",
-      "breaks": [{"start": "04:00", "end": "04:30"}]
-    }
-  ],
-
+  { "machine_id": "M001", "work_center_id": "WC_MACH", "attendance": "attended", "requires_setup_operator": true },
+  { "machine_id": "M002", "work_center_id": "WC_MACH", "attendance": "setup-attended", "requires_setup_operator": true, "unattended_from": 18, "unattended_to": 24 },
+  { "machine_id": "M003", "work_center_id": "WC_ASSY", "attendance": "attended" },
+  { "machine_id": "M004", "work_center_id": "WC_PRESS", "attendance": "attended" },
+  { "machine_id": "M005", "work_center_id": "WC_FIN",  "attendance": "unattended", "unattended_from": 0, "unattended_to": 24 }
+],
   "routings": [
     {
-      "routing_id": "R001",
+      "routing_id": "R_A",
       "operations": [
         {
           "op_no": 1,
-          "name": "Cutting",
-          "work_center_id": "WC_CUT",
-          "proc_time_per_unit_min": 9,
-          "setup_time_fixed_min": 10,
-          "setup_state_key": "MAT_A",
-          "batchable": true,
-          "batch": {
-            "min_batch_qty": 20,
-            "max_batch_qty": 100,
-            "setup_amortize": true
-          },
-          "preemptable": false,
-          "checkpointable": false
+          "name": "Machining",
+          "work_center_id": "WC_MACH",
+          "proc_time_per_unit_min": 1.2,
+          "setup_time_fixed_min": 30,
+          "preemptable": false
+        },
+        {
+          "op_no": 2,
+          "name": "Drilling",
+          "work_center_id": "WC_MACH",
+          "proc_time_per_unit_min": 0.6,
+          "setup_time_fixed_min": 20,
+          "preemptable": false
+        },
+        {
+          "op_no": 3,
+          "name": "Assembly",
+          "work_center_id": "WC_ASSY",
+          "proc_time_per_unit_min": 0.9,
+          "setup_time_fixed_min": 15,
+          "preemptable": false
+        }
+      ]
+    },
+    {
+      "routing_id": "R_B",
+      "operations": [
+        {
+          "op_no": 1,
+          "name": "Pressing",
+          "work_center_id": "WC_PRESS",
+          "proc_time_per_unit_min": 1.6,
+          "setup_time_fixed_min": 25,
+          "preemptable": false
         },
         {
           "op_no": 2,
           "name": "Painting",
-          "work_center_id": "WC_PAINT",
-          "proc_time_per_unit_min": 15,
-          "setup_time_fixed_min": 12,
-          "setup_state_key": "color_red",
-          "batchable": true,
-          "batch": {
-            "min_batch_qty": 10,
-            "max_batch_qty": 50
-          },
-          "preemptable": true,
-          "checkpointable": true,
-          "preemption_overhead_min": 20,
-          "setup_requires_operator": true,
-          "run_requires_operator": true
+          "work_center_id": "WC_FIN",
+          "proc_time_per_unit_min": 1.4,
+          "setup_time_fixed_min": 30,
+          "preemptable": false
+        },
+        {
+          "op_no": 3,
+          "name": "Assembly",
+          "work_center_id": "WC_ASSY",
+          "proc_time_per_unit_min": 1.0,
+          "setup_time_fixed_min": 15,
+          "preemptable": false
+        }
+      ]
+    },
+    {
+      "routing_id": "R_C",
+      "operations": [
+        {
+          "op_no": 1,
+          "name": "Machining",
+          "work_center_id": "WC_MACH",
+          "proc_time_per_unit_min": 1.3333,
+          "setup_time_fixed_min": 30,
+          "preemptable": false
+        },
+        {
+          "op_no": 2,
+          "name": "Painting",
+          "work_center_id": "WC_FIN",
+          "proc_time_per_unit_min": 0.8,
+          "setup_time_fixed_min": 30,
+          "preemptable": false
+        },
+        {
+          "op_no": 3,
+          "name": "Packaging",
+          "work_center_id": "WC_ASSY",
+          "proc_time_per_unit_min": 0.5333,
+          "setup_time_fixed_min": 10,
+          "preemptable": false
+        }
+      ]
+    },
+    {
+      "routing_id": "R_D",
+      "operations": [
+        {
+          "op_no": 1,
+          "name": "Pressing",
+          "work_center_id": "WC_PRESS",
+          "proc_time_per_unit_min": 0.75,
+          "setup_time_fixed_min": 25,
+          "preemptable": false
+        },
+        {
+          "op_no": 2,
+          "name": "Drilling",
+          "work_center_id": "WC_MACH",
+          "proc_time_per_unit_min": 0.6,
+          "setup_time_fixed_min": 20,
+          "preemptable": false
+        },
+        {
+          "op_no": 3,
+          "name": "Painting",
+          "work_center_id": "WC_FIN",
+          "proc_time_per_unit_min": 0.65,
+          "setup_time_fixed_min": 30,
+          "preemptable": false
+        },
+        {
+          "op_no": 4,
+          "name": "Assembly",
+          "work_center_id": "WC_ASSY",
+          "proc_time_per_unit_min": 0.5,
+          "setup_time_fixed_min": 15,
+          "preemptable": false
         }
       ]
     }
   ],
-
-  "setup_matrices": [
-    {
-      "setup_matrix_id": "SETUP_MATRIX_CUT",
-      "default_unit": "minutes",
-      "matrix": {
-        "MAT_A": {"MAT_A": 5, "MAT_B": 12},
-        "MAT_B": {"MAT_A": 10, "MAT_B": 6},
-        "clean": {"MAT_A": 8, "MAT_B": 15}
-      }
-    },
-    {
-      "setup_matrix_id": "SETUP_MATRIX_PAINT",
-      "default_unit": "minutes",
-      "matrix": {
-        "color_red": {"color_red": 4, "color_blue": 30},
-        "color_blue": {"color_red": 28, "color_blue": 5},
-        "clean": {"color_red": 10, "color_blue": 10}
-      }
-    }
-  ],
-
   "preference_settings": {
-    "allow_job_preemption": true,
-    "preemption_global_penalty": 100.0,
-    "batch_priority": "reduce_setups",
-    "merge_orders_for_batching": true
+    "allow_job_preemption": false
   },
-
   "settings": {
+    "time_unit": "minutes",
     "objective_weights": {
       "makespan": 1.0,
       "tardiness": 10.0,
-      "setup_cost": 5.0,
-      "preemption_cost": 50.0,
-      "batching_benefit": -2.0
-    },
-    "lateness_sla": [
-      {"upto_hours": 2, "multiplier": 1.0},
-      {"upto_hours": 12, "multiplier": 3.0},
-      {"upto_hours": null, "multiplier": 10.0}
-    ],
-    "time_unit": "minutes"
-  },
-
-  "speed_overrides": [
-    {
-      "key": ["M_CUT_1", "P001", "Cutting"],
-      "multiplier": 1.10
+      "preemption_cost": 20.0
     }
-  ]
+  }
 }

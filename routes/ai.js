@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 const { randomUUID } = require('crypto');
+const axios = require('axios');
 
 module.exports = (db) => {
   const router = express.Router();
@@ -23,6 +24,74 @@ module.exports = (db) => {
   router.get('/ping', (req, res) => {
     res.json({ ok: true, route: 'ai', msg: 'AI router is alive' });
   });
+
+router.post('/map_fields', async (req, res) => {
+  const { internalData, externalFields } = req.body;
+
+  if (!internalData || !externalFields) {
+    return res.status(400).json({
+      ok: false,
+      error: 'missing_input',
+      detail: 'internalData and externalFields are required',
+    });
+  }
+
+  // --- สร้าง prompt สำหรับโมเดล ---
+  const prompt = `
+คุณมี internal field names:
+${JSON.stringify(internalData)}
+
+และ external field names:
+${JSON.stringify(externalFields)}
+
+กรุณาสร้าง mapping JSON array ให้ key เป็น external field และ value เป็น internal field ที่ตรงที่สุด
+พร้อมเพิ่มความมั่นใจ confidence ระหว่าง 0–1 สำหรับแต่ละ mapping
+สำหรับ field ที่ไม่แน่ใจ ให้ map เป็น "__user_choose__"
+ตอบ JSON ตรง ๆ เช่น:
+[
+  { "external": "machineCode", "internal": "machine_code", "confidence": 0.95 },
+  { "external": "assignedTo", "internal": "__user_choose__", "confidence": 0.4 }
+]
+`;
+
+  try {
+    const response = await axios.post('http://192.168.11.87:11434/api/generate', {
+      model: 'scb10x/typhoon2.1-gemma3-4b',
+      prompt,
+      stream: false,
+    });
+
+    let text = response.data.response || '';
+    text = text.replace(/```json|```/g, '').trim();
+
+    let mappedData = [];
+    try {
+      mappedData = JSON.parse(text);
+    } catch (parseErr) {
+      console.error('JSON parse error:', parseErr.message, text);
+      return res.status(500).json({
+        ok: false,
+        error: 'invalid_json',
+        detail: 'Ollama API returned invalid JSON',
+        raw: text,
+      });
+    }
+
+    // --- กำหนด threshold เพิ่ม safety ---
+    const confidenceThreshold = 0.8;
+    mappedData = mappedData.map(m => {
+      if (m.confidence < confidenceThreshold) {
+        return { ...m, internal: "__user_choose__" }; 
+      }
+      return m;
+    });
+
+    res.json({ ok: true, mappedData });
+  } catch (err) {
+    console.error('Ollama API error:', err.message);
+    res.status(500).json({ ok: false, error: 'ollama_error', detail: err.message });
+  }
+});
 
   router.get('/diag', (req, res) => {
     res.json({

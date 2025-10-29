@@ -1,24 +1,22 @@
 # scheduler_refactored.py
 # -------------------------------------------------------------
-# Robust GA + Local Search (SA/Tabu) minimalist scheduler
-# - Supports single-line & multi-line orders
-# - Time normalize: *_min (minutes) or hour values (auto-convert)
-# - Candidate machines from machines + work_centers.parallel_machines
-# - Handles best=None (no feasible slot) by skipping & penalizing in objective
-# - Shift windows with holidays, breaks (subtracted), maintenance
-# - Operator flags (setup/run) used only to enforce "no-cross-break" contiguous windows
-# - Clear separation via Context + interval utilities
+# GA + Local Search minimalist scheduler (no operators modeling)
+# รวมแพตช์:
+#  - กัน None ทุกชั้น (normalize chromosome + decode filter)
+#  - แตกก้อนแบบฉลาด: ถ้ามีขั้นตอน Painting ใช้ max_batch (ลดจำนวนก้อนที่คอขวด)
+#  - fail_stats: นับเหตุผลที่วางไม่ได้ (debug คอขวด/OT cap/slot)
+#  - fallback horizon: ถ้า skipped ยังสูง ลองขยาย horizon +7 / +14 วันอัตโนมัติ
 # -------------------------------------------------------------
 from __future__ import annotations
 import json, os, math, random, datetime as dt
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple, Optional
 from copy import deepcopy
+from collections import defaultdict
 
 # ============================= Utilities =============================
 
 def parse_datetime(s) -> dt.datetime:
-    """Parse many common formats. Raise if impossible to avoid silent bugs."""
     if isinstance(s, dt.datetime):
         return s
     if not s:
@@ -33,101 +31,35 @@ def parse_datetime(s) -> dt.datetime:
     for f in fmts:
         try:
             d = dt.datetime.strptime(str(s), f)
+            if d.tzinfo:
+                d = d.astimezone(dt.timezone.utc).replace(tzinfo=None)
             return d
         except Exception as e:
             last_err = e
             continue
     raise ValueError(f"Cannot parse datetime: {s!r}. Last error: {last_err}")
 
-
 def timedelta_minutes(m: float) -> dt.timedelta:
     return dt.timedelta(seconds=float(m) * 60.0)
 
-
 # ============================= Data Loading =============================
 
-def load_data(json_path: str = "/mnt/data/mock_without_operator.json") -> Dict[str, Any]:
+def load_data(json_path: str = "./mock_without_operator.json") -> Dict[str, Any]:
     if os.path.exists(json_path):
         with open(json_path, "r", encoding="utf-8") as f:
             return json.load(f)
-    # Minimal fallback sample
-    sample = {
-        "orders": [
-            {"order_id": "ORD001", "product_id": "P001", "quantity": 50, "due_date": "2025-10-22T17:00:00", "priority": 1}
-        ],
-        "orders_multiline": [
-            {"order_id":"ORD002","due_date":"2025-10-23T17:00:00",
-             "lines":[{"product_id":"P001","quantity":40},{"product_id":"P002","quantity":30}]}
-        ],
-        "products": [
-            {"product_id":"P001","name":"Widget A","routing_id":"R001","bom_id":"B001"},
-            {"product_id":"P002","name":"Widget B","routing_id":"R002","bom_id":"B002"}
-        ],
-        "routings": [
-            {"routing_id":"R001","operations":[
-                {"op_no":1,"name":"Cut","work_center_id":"WC_CUT","proc_time_per_unit":0.15,"setup_time_fixed":10,
-                 "setup_state_key":"MAT_A","batchable":True,"batch":{"min_batch_qty":20,"max_batch_qty":100},
-                 "setup_requires_operator": True},
-                {"op_no":2,"name":"Paint","work_center_id":"WC_PAINT","proc_time_per_unit":0.25,"setup_time_fixed":15,
-                 "setup_state_key":"color_red","batchable":True,"batch":{"min_batch_qty":10,"max_batch_qty":100},
-                 "run_requires_operator": True}
-            ]},
-            {"routing_id":"R002","operations":[
-                {"op_no":1,"name":"Cut B","work_center_id":"WC_CUT","proc_time_per_unit":0.20,"setup_time_fixed":8,
-                 "setup_state_key":"MAT_B","batchable":True,"batch":{"min_batch_qty":10,"max_batch_qty":80}}
-            ]}
-        ],
-        "work_centers":[
-            {"work_center_id":"WC_CUT","name":"Cutting","parallel_machines":["M_CUT_1","M_CUT_2"], "setup_matrix_id": "SETUP_MATRIX_CUT",
-             "setup_requires_operator": True, "run_requires_operator": False},
-            {"work_center_id":"WC_PAINT","name":"Painting","parallel_machines":["M_PAINT_1"], "setup_matrix_id": "SETUP_MATRIX_PAINT",
-             "setup_requires_operator": True, "run_requires_operator": True}
-        ],
-        "machines": [
-            {"machine_id":"M_CUT_1","work_center_id":"WC_CUT","initial_state":"clean", "efficiency": 0.95, "shifts":["S1","S2"]},
-            {"machine_id":"M_CUT_2","work_center_id":"WC_CUT","initial_state":"clean", "shifts":["S1","S2"]},
-            {"machine_id":"M_PAINT_1","work_center_id":"WC_PAINT","initial_state":"clean", "requires_operator_for_run": True, "shifts":["S1"]}
-        ],
-        "setup_matrices":[
-            {"setup_matrix_id":"SETUP_MATRIX_CUT","matrix":{
-                "clean":{"MAT_A":8,"MAT_B":10},
-                "MAT_A":{"MAT_A":5,"MAT_B":12},
-                "MAT_B":{"MAT_A":10,"MAT_B":6}
-            }},
-            {"setup_matrix_id":"SETUP_MATRIX_PAINT","matrix":{
-                "clean":{"color_red":10,"color_blue":10},
-                "color_red":{"color_red":4,"color_blue":30},
-                "color_blue":{"color_red":28,"color_blue":5}
-            }}
-        ],
-        "calendar": {
-            "holidays": ["2025-10-23"],
-            "machine_maintenances": [
-                {"machine_id":"M_CUT_1", "start":"2025-10-14 12:00", "end":"2025-10-14 16:00"}
-            ]
-        },
-        "shifts": [
-            {"shift_id":"S1","name":"Day","start_time":"08:00","end_time":"17:00","breaks":[{"start":"12:00","end":"13:00"}]},
-            {"shift_id":"S2","name":"Evening","start_time":"17:00","end_time":"01:00","breaks":[{"start":"21:00","end":"21:30"}]}
-        ],
-        "settings":{"objective_weights":{"makespan":1.0,"tardiness":10.0,"setup_cost":5.0}}
-    }
-    return sample
-
+    raise FileNotFoundError(f"Data file not found: {json_path}")
 
 # ============================= Indexers & Context =============================
 
 def index_products(products: List[Dict[str, Any]]):
     return {p['product_id']: p for p in products}
 
-
 def index_routings(routings: List[Dict[str, Any]]):
     return {r['routing_id']: r for r in routings}
 
-
 def index_work_centers(work_centers: List[Dict[str, Any]]):
     return {w['work_center_id']: w for w in work_centers}
-
 
 def index_machines(machines: List[Dict[str, Any]]):
     by_id = {m['machine_id']: m for m in machines}
@@ -136,10 +68,8 @@ def index_machines(machines: List[Dict[str, Any]]):
         by_wc.setdefault(m['work_center_id'], []).append(m)
     return by_id, by_wc
 
-
 def index_setup_mats(setup_matrices: List[Dict[str, Any]]):
     return {m['setup_matrix_id']: m for m in setup_matrices} if setup_matrices else {}
-
 
 def collect_speed_overrides(d: Dict[str, Any]) -> List[Dict[str, Any]]:
     res = []
@@ -152,7 +82,6 @@ def collect_speed_overrides(d: Dict[str, Any]) -> List[Dict[str, Any]]:
             if kk is not None and val is not None:
                 res.append({"key": kk, "multiplier": val})
     return res
-
 
 @dataclass(frozen=True)
 class Context:
@@ -186,19 +115,46 @@ class Context:
             settings=data.get('settings', {}) or {}
         )
 
+# ============================= Helpers: Product routing candidates =============================
+
+def product_routing_candidates(ctx: Context, product_id: str) -> List[Dict[str, Any]]:
+    p = ctx.idx_products.get(product_id)
+    if not p:
+        return []
+    rids: List[str] = []
+    if 'routing_ids' in p and isinstance(p['routing_ids'], list) and p['routing_ids']:
+        rids = [rid for rid in p['routing_ids'] if rid in ctx.idx_routings]
+    elif 'routing_id' in p and p['routing_id'] in ctx.idx_routings:
+        rids = [p['routing_id']]
+    return [ctx.idx_routings[rid] for rid in rids]
 
 # ============================= Batch builder =============================
 
-def normalize_orders_for_batching(data: Dict[str, Any]):
-    base = list(data.get('orders', []))
-    multi = list(data.get('orders_multiline', []))
-    return base + multi
+def _derive_batch_rule_for_product(ctx: Context, product_id: str, qty_total: int) -> Tuple[int, int]:
+    p = ctx.idx_products.get(product_id) or {}
+    lot_size = p.get('lot_size')
+    if isinstance(lot_size, (int, float)) and lot_size > 0:
+        ls = int(lot_size)
+        return (ls, max(ls, ls * 5))
+    cands = product_routing_candidates(ctx, product_id)
+    if cands:
+        for op in cands[0].get('operations', []):
+            if op.get('batchable'):
+                b = op.get('batch', {}) or {}
+                mn = int(b.get('min_batch_qty', qty_total))
+                mx = int(b.get('max_batch_qty', qty_total))
+                mx = max(1, mx)
+                return (mn, mx)
+    return (qty_total, qty_total)
 
+def _has_painting(ctx: Context, product_id: str) -> bool:
+    cands = product_routing_candidates(ctx, product_id)
+    if not cands:
+        return False
+    ops = cands[0].get('operations', []) or []
+    return any((op.get('name') or '').lower() == 'painting' for op in ops)
 
 def build_batches(ctx: Context, orders: List[Dict[str, Any]]):
-    prod_by_id = ctx.idx_products
-    routing_by_id = ctx.idx_routings
-
     batches = []
     now = dt.datetime.now()
 
@@ -207,69 +163,43 @@ def build_batches(ctx: Context, orders: List[Dict[str, Any]]):
         order_rel = parse_datetime(order.get('release_date', now.strftime("%Y-%m-%d %H:%M")))
         order_pri = order.get('priority', 1)
 
-        if 'lines' in order and isinstance(order['lines'], list):
-            lines = order['lines']
-        else:
-            lines = [{
-                'product_id': order.get('product_id'),
-                'quantity': order.get('quantity', 0),
-                'priority': order_pri
-            }]
+        lines = order['lines'] if isinstance(order.get('lines'), list) else [{
+            'product_id': order.get('product_id'),
+            'quantity': order.get('quantity', 0),
+            'priority': order_pri
+        }]
 
-        for line in lines:
+        for idx_line, line in enumerate(lines, start=1):
             pid = line['product_id']
             qty_total = int(line['quantity'])
-            prod = prod_by_id.get(pid)
-            if not prod:
-                continue
-            routing = routing_by_id.get(prod['routing_id'])
-            if not routing:
+            if pid not in ctx.idx_products:
                 continue
 
-            # first batchable op as rule (if any)
-            batch_rule = {}
-            for op in routing.get('operations', []):
-                if op.get('batchable'):
-                    batch_rule = op.get('batch', {})
-                    break
+            min_batch, max_batch = _derive_batch_rule_for_product(ctx, pid, qty_total)
+            prefer_max = _has_painting(ctx, pid)  # ✅ ถ้ามี Painting ให้ใช้ max_batch
 
-            min_batch = int(batch_rule.get('min_batch_qty', qty_total))
-            max_batch = max(1, int(batch_rule.get('max_batch_qty', qty_total)))
             remaining = qty_total
-
+            seq = 0
             while remaining > 0:
-                take = min(remaining, max_batch)
-                # if last chunk smaller than min_batch, merge with previous if exists
-                if remaining <= max_batch and take < min_batch and batches and batches[-1]['order_id'] == order['order_id'] and batches[-1]['product_id'] == pid:
-                    batches[-1]['qty'] += take
-                else:
-                    batches.append({
-                        "order_id": order['order_id'],
-                        "product_id": pid,
-                        "routing_id": prod['routing_id'],
-                        "qty": take,
-                        "priority": line.get('priority', order_pri),
-                        "due_date": order_due,
-                        "release_date": order_rel
-                    })
+                take = min(remaining, (max_batch if prefer_max else min_batch))
+                seq += 1
+                batches.append({
+                    "batch_id": f"B{order['order_id'][-3:]}{idx_line:02d}{seq:02d}",
+                    "order_id": order['order_id'],
+                    "product_id": pid,
+                    "qty": take,
+                    "priority": line.get('priority', order_pri),
+                    "due_date": order_due,
+                    "release_date": order_rel
+                })
                 remaining -= take
     return batches
 
-
 # ============================= Time & Cost helpers =============================
-
-def _get_fixed_setup_min(op: Dict[str, Any]) -> float:
-    if 'setup_time_fixed_min' in op:
-        return float(op['setup_time_fixed_min'])
-    if 'setup_time_fixed' in op:
-        return float(op['setup_time_fixed']) * 60.0
-    return 0.0
-
 
 def _lookup_matrix_setup_min(ctx: Context, prev_state: str, next_state: str, machine: Dict[str, Any], op: Dict[str, Any]) -> float:
     mat_id = machine.get('setup_matrix_id') or op.get('setup_matrix_id')
     if not mat_id:
-        # fallback by work center
         wc_id = op.get('work_center_id')
         wc = ctx.idx_wc.get(wc_id) if wc_id else None
         mat_id = wc.get('setup_matrix_id') if wc else None
@@ -278,11 +208,26 @@ def _lookup_matrix_setup_min(ctx: Context, prev_state: str, next_state: str, mac
         matrix = mat_obj.get('matrix', {})
         if prev_state in matrix and next_state in matrix[prev_state]:
             return float(matrix[prev_state][next_state])
-    return _get_fixed_setup_min(op)
 
+    if 'setup_time_fixed_min' in op:
+        return float(op['setup_time_fixed_min'])
+    if 'setup_time_fixed' in op:
+        return float(op['setup_time_fixed']) * 60.0
+
+    if machine and 'default_setup_min' in machine:
+        try:
+            return float(machine['default_setup_min'])
+        except Exception:
+            pass
+    wc = ctx.idx_wc.get(op.get('work_center_id')) if op.get('work_center_id') else None
+    if wc and 'default_setup_min' in wc:
+        try:
+            return float(wc['default_setup_min'])
+        except Exception:
+            pass
+    return 0.0
 
 def _get_proc_time_min(ctx: Context, op: Dict[str, Any], qty: float, *, machine_id: Optional[str]=None, product_id: Optional[str]=None, machine_eff: float=1.0) -> float:
-    # accept proc_time_per_unit_min or proc_time_per_unit (hours)
     if 'proc_time_per_unit_min' in op:
         per_unit_min = float(op['proc_time_per_unit_min'])
     elif 'proc_time_per_unit' in op:
@@ -292,7 +237,6 @@ def _get_proc_time_min(ctx: Context, op: Dict[str, Any], qty: float, *, machine_
 
     total_min = per_unit_min * float(qty)
 
-    # speed overrides
     for so in ctx.speed_overrides:
         key = so.get('key', [])
         mult = so.get('multiplier', 1.0) or 1.0
@@ -307,16 +251,15 @@ def _get_proc_time_min(ctx: Context, op: Dict[str, Any], qty: float, *, machine_
             if (machine_id == mk) and (op.get('name') == ok):
                 total_min = total_min / mult
 
-    # efficiency (e.g., 0.9 → slower → more minutes)
     if machine_eff and machine_eff > 0:
         total_min = total_min / float(machine_eff)
 
     return total_min
 
-
-# ============================= Interval utils =============================
+# ============================= Interval & Window utils =============================
 
 Interval = Tuple[dt.datetime, dt.datetime]
+Window = Tuple[dt.datetime, dt.datetime, str]  # 'REG' | 'OT'
 
 def _merge_intervals(intervals: List[Interval]) -> List[Interval]:
     if not intervals:
@@ -331,9 +274,7 @@ def _merge_intervals(intervals: List[Interval]) -> List[Interval]:
             merged.append((s, e))
     return merged
 
-
 def _subtract_intervals(base: List[Interval], subtracts: List[Interval]) -> List[Interval]:
-    """Subtract 'subtracts' from 'base' (both lists of [s,e])."""
     if not base:
         return []
     if not subtracts:
@@ -345,10 +286,9 @@ def _subtract_intervals(base: List[Interval], subtracts: List[Interval]) -> List
         for ss, se in subtracts:
             next_segments: List[Interval] = []
             for cs, ce in cur_segments:
-                if se <= cs or ss >= ce:  # no overlap
+                if se <= cs or ss >= ce:
                     next_segments.append((cs, ce))
                 else:
-                    # overlap
                     if ss > cs:
                         next_segments.append((cs, ss))
                     if se < ce:
@@ -357,162 +297,198 @@ def _subtract_intervals(base: List[Interval], subtracts: List[Interval]) -> List
         out.extend(cur_segments)
     return [seg for seg in out if seg[1] > seg[0]]
 
-
-def _intersect_two(a: List[Interval], b: List[Interval]) -> List[Interval]:
-    i, j = 0, 0
-    res: List[Interval] = []
-    a = sorted(a)
-    b = sorted(b)
-    while i < len(a) and j < len(b):
-        s = max(a[i][0], b[j][0])
-        e = min(a[i][1], b[j][1])
-        if s < e:
-            res.append((s, e))
-        if a[i][1] < b[j][1]:
-            i += 1
-        else:
-            j += 1
-    return res
-
-
-# ============================= Windows (shifts/holidays/maintenance) =============================
-
+# แทนของเดิม
 def _time_on_date(date: dt.date, hhmm: str) -> dt.datetime:
-    hh, mm = map(int, hhmm.split(":"))
+    hh, mm = hhmm.split(":")
+    hh = int(hh); mm = int(mm or 0)
+    if hh == 24 and mm == 0:
+        return dt.datetime(year=date.year, month=date.month, day=date.day) + dt.timedelta(days=1)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError(f"Invalid time: {hhmm}")
     return dt.datetime(year=date.year, month=date.month, day=date.day, hour=hh, minute=mm)
 
+def _split_minutes_by_day(s: dt.datetime, e: dt.datetime) -> Dict[dt.date, float]:
+    out: Dict[dt.date, float] = {}
+    cur = s
+    while cur < e:
+        end_day = (cur.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1))
+        seg_end = min(e, end_day)
+        out.setdefault(cur.date(), 0.0)
+        out[cur.date()] += (seg_end - cur).total_seconds() / 60.0
+        cur = seg_end
+    return out
 
-def build_shift_windows(ctx: Context, start_anchor: dt.datetime, days: int = 7) -> Dict[str, List[Interval]]:
-    """Return dict(machine_id -> windows). Removes breaks, holidays, maintenance."""
-    data = ctx.data
-    # shifts indexed
-    shift_by = {s['shift_id']: s for s in data.get('shifts', [])}
+# ============================= Windows (shifts/holidays/maintenance + OT) =============================
 
-    # prebuild shift windows by id (subtract breaks)
-    windows_by_shift: Dict[str, List[Interval]] = {}
+def build_shift_windows(ctx: Context, start_anchor: dt.datetime, days: int = 14) -> Dict[str, List[Window]]:
+    data = ctx.data or {}
+    cal = (data.get('calendar') or {})
+
+    # --- normalize helpers ---
+    def _normalize_breaks(bks):
+        out = []
+        if not bks:
+            return out
+        for br in bks:
+            if isinstance(br, (list, tuple)) and len(br) == 2:
+                out.append({'start': str(br[0]), 'end': str(br[1])})
+            elif isinstance(br, dict) and 'start' in br and 'end' in br:
+                out.append({'start': str(br['start']), 'end': str(br['end'])})
+        return out
+
+    global_breaks = _normalize_breaks(cal.get('breaks') or data.get('breaks'))
+
+    # 1) เตรียม shifts: ใช้ data['shifts'] ถ้ามี; ถ้าไม่มีก็ลอง calendar.shifts
+    raw_shifts = data.get('shifts') or []
+    if not raw_shifts and isinstance(cal.get('shifts'), list):
+        # map เป็นรูปแบบเดิม
+        raw_shifts = [
+            {
+                'shift_id': s.get('shift_id') or s.get('id') or f"cal_{i+1}",
+                'start_time': s.get('start') or s.get('start_time'),
+                'end_time':   s.get('end')   or s.get('end_time'),
+                # รองรับกรณีแนบ breaks ใน shift; รวมกับ global เสมอ
+                'breaks': _normalize_breaks(s.get('breaks'))
+            }
+            for i, s in enumerate(cal['shifts'])
+        ]
+
+    shift_by = {s['shift_id']: s for s in raw_shifts}
+
+    # 2) คำนวณช่วง REG ต่อ shift และหัก breaks (shift + global)
+    reg_by_shift: Dict[str, List[Interval]] = {}
     for sid, s in shift_by.items():
         windows: List[Interval] = []
+        shift_breaks = _normalize_breaks(s.get('breaks')) + global_breaks
+
         for d in range(days):
             base = (start_anchor.date() + dt.timedelta(days=d))
             st = _time_on_date(base, s['start_time'])
             en = _time_on_date(base, s['end_time'])
-            if en <= st:  # cross-midnight
+            if en <= st:
                 en = en + dt.timedelta(days=1)
+
             day_windows = [(st, en)]
-            # subtract breaks
-            for br in (s.get('breaks') or []):
+
+            # subtract ทุก break ของวันนั้น
+            for br in (shift_breaks or []):
                 brs = _time_on_date(base, br['start'])
                 bre = _time_on_date(base, br['end'])
                 if bre <= brs:
-                    bre = bre + dt.timedelta(days=1)  # break crosses midnight
+                    bre = bre + dt.timedelta(days=1)
                 day_windows = _subtract_intervals(day_windows, [(brs, bre)])
-            windows.extend(day_windows)
-        windows_by_shift[sid] = _merge_intervals(windows)
 
-    # Holidays subtraction for machines
+            windows.extend(day_windows)
+
+        reg_by_shift[sid] = _merge_intervals(windows)
+
+    # 3) holidays (จาก calendar.holidays)
     holis = []
-    for h in (data.get('calendar', {}) or {}).get('holidays', []) or []:
+    for h in (cal.get('holidays') or []):
         try:
             d = dt.datetime.strptime(h, "%Y-%m-%d").date()
         except Exception:
             d = parse_datetime(h).date()
-        holis.append((dt.datetime(d.year, d.month, d.day), dt.datetime(d.year, d.month, d.day) + dt.timedelta(days=1)))
+        holis.append(
+            (dt.datetime(d.year, d.month, d.day),
+             dt.datetime(d.year, d.month, d.day) + dt.timedelta(days=1))
+        )
 
-    # Machines windows
+    # 4) map windows ต่อเครื่อง (รวมหลาย shift ของเครื่องเดียวกัน)
     machines_by_id = ctx.idx_machines_by_id
-    windows_by_machine: Dict[str, List[Interval]] = {}
+    reg_by_machine: Dict[str, List[Interval]] = {}
     for mid, m in machines_by_id.items():
         shift_ids = m.get('shifts', [])
         merged: List[Interval] = []
         for sid in shift_ids:
-            merged.extend(windows_by_shift.get(sid, []))
-        if not merged:  # 24/7 default
+            merged.extend(reg_by_shift.get(sid, []))
+
+        # ถ้าเครื่องไม่มี shift ให้ default เป็นทั้งช่วงวัน
+        if not merged:
             start = start_anchor.replace(hour=0, minute=0, second=0, microsecond=0)
             merged = [(start, start + dt.timedelta(days=days))]
+
         merged = _merge_intervals(merged)
-        # subtract holidays
         merged = _subtract_intervals(merged, holis)
-        # subtract maintenance
+
+        # 5) maintenance ต่อเครื่อง
         maints: List[Interval] = []
-        for mm in (data.get('calendar', {}) or {}).get('machine_maintenances', []) or []:
+        for mm in (cal.get('machine_maintenances') or []):
             if mm.get('machine_id') == mid:
                 ms = parse_datetime(mm['start'])
                 me = parse_datetime(mm['end'])
-                maints.append((ms, me))
+                if me > ms:
+                    maints.append((ms, me))
         merged = _subtract_intervals(merged, maints)
-        windows_by_machine[mid] = merged
+        reg_by_machine[mid] = merged
+
+    # 6) OT windows (global) ลบช่วง REG ออกให้เหลือเฉพาะส่วนที่เป็น OT
+    raw_ots: List[Interval] = []
+    for ow in (cal.get('ot_windows') or []):
+        try:
+            s = parse_datetime(ow['start'])
+            e = parse_datetime(ow['end'])
+        except Exception:
+            continue
+        if e > s:
+            raw_ots.append((s, e))
+    raw_ots = _merge_intervals(raw_ots)
+
+    windows_by_machine: Dict[str, List[Window]] = {}
+    for mid in machines_by_id.keys():
+        reg = reg_by_machine.get(mid, [])
+        ot_minus_reg: List[Interval] = []
+        for (os_, oe_) in raw_ots:
+            segs = _subtract_intervals([(os_, oe_)], reg)
+            ot_minus_reg.extend(segs)
+        ot_minus_reg = _merge_intervals(ot_minus_reg)
+
+        windows: List[Window] = []
+        for s_, e_ in reg:
+            windows.append((s_, e_, "REG"))
+        for s_, e_ in ot_minus_reg:
+            windows.append((s_, e_, "OT"))
+        windows.sort(key=lambda x: x[0])
+        windows_by_machine[mid] = windows
 
     return windows_by_machine
 
+# ============================= Packing helpers =============================
 
-def _find_slot_in_windows(windows: List[Interval], earliest: dt.datetime, need_min: float, require_full_coverage: bool = False) -> Optional[Interval]:
-    """Find first slot (s,e) within windows after earliest, with duration need_min minutes contiguous.
-       If require_full_coverage=True, slot must lie wholly inside one window.
-    """
-    need = dt.timedelta(minutes=need_min)
-    for ws, we in windows:
+def _find_slot_contiguous(windows: List[Window], earliest: dt.datetime, need_min: float) -> Optional[Tuple[dt.datetime, dt.datetime]]:
+    need = dt.timedelta(minutes=float(need_min))
+    for ws, we, _kind in windows:
         s = max(ws, earliest)
-        if require_full_coverage:
-            if we - s >= need:
-                return (s, s + need)
-        else:
-            # Same behavior (contiguous within a window). Multi-window stitching not implemented.
-            if we - s >= need:
-                return (s, s + need)
+        if we - s >= need:
+            return (s, s + need)
     return None
 
-
-# ============================= Decode & Evaluate =============================
-
-def _get_flag(op: Dict[str, Any], mc: Optional[Dict[str, Any]], wc: Optional[Dict[str, Any]], key: str) -> bool:
-    """Flag inheritance: operation > machine > work_center > False.
-       For run: also map machine.requires_operator_for_run -> run_requires_operator.
-    """
-    if op is not None and key in op:
-        return bool(op[key])
-    if mc is not None:
-        if key == "run_requires_operator" and "requires_operator_for_run" in mc:
-            return bool(mc.get("requires_operator_for_run"))
-        if key in mc:
-            return bool(mc[key])
-    if wc is not None and key in wc:
-        return bool(wc[key])
-    return False
-
-def _pack_across_windows(windows: List[Interval], earliest: dt.datetime, need_min: float, *,
+def _pack_across_windows(windows: List[Window], earliest: dt.datetime, need_min: float, *,
                          setup_min: float = 0.0,
-                         preemption_overhead_min: float = 0.0) -> Optional[Tuple[dt.datetime, dt.datetime, float]]:
-    """
-    พยายามบรรจุงานลงหลาย window ต่อเนื่องหลัง earliest:
-    - วาง setup ก่อน (ใน window แรกที่พอ)
-    - ส่วน run ที่เหลือ กระจายลงหลาย window ได้
-    - บวก overhead ทุกครั้งที่ข้าม window (หลังจาก window แรก)
-    return: (start, finish, total_overhead_min)
-    """
-    remaining = dt.timedelta(minutes=need_min)
-    setup_td = dt.timedelta(minutes=setup_min)
-    ovh_td   = dt.timedelta(minutes=preemption_overhead_min)
-    total_ovh = dt.timedelta(0)
+                         preemption_overhead_min: float = 0.0) -> Optional[Tuple[dt.datetime, dt.datetime, float, int, Dict[dt.date, float]]]:
+    remaining = dt.timedelta(minutes=float(need_min))
+    setup_td  = dt.timedelta(minutes=float(setup_min))
+    ovh_td    = dt.timedelta(minutes=float(preemption_overhead_min))
 
-    started = None
+    started: Optional[dt.datetime] = None
     cur_time = earliest
+    total_ovh = dt.timedelta(0)
+    num_splits = 0
+    ot_minutes_by_day: Dict[dt.date, float] = {}
 
-    for ws, we in windows:
+    for ws, we, kind in windows:
         s = max(ws, cur_time)
         if s >= we:
             continue
 
-        # วาง setup ก่อน (ครั้งเดียว)
         if setup_td > dt.timedelta(0):
             if we - s >= setup_td:
-                # วาง setup ตรงนี้
                 if started is None:
                     started = s
                 s = s + setup_td
                 remaining -= setup_td
                 setup_td = dt.timedelta(0)
             else:
-                # ช่องนี้ใส่ setup ไม่พอ → ข้ามไป window ถัดไป (ไม่คิด overhead จนกว่าจะเริ่มรัน)
                 continue
 
         if remaining <= dt.timedelta(0):
@@ -523,116 +499,79 @@ def _pack_across_windows(windows: List[Interval], earliest: dt.datetime, need_mi
             continue
 
         use = min(usable, remaining)
+        if kind == "OT":
+            seg_s = s
+            seg_e = s + use
+            per_day = _split_minutes_by_day(seg_s, seg_e)
+            for dkey, mins in per_day.items():
+                ot_minutes_by_day[dkey] = ot_minutes_by_day.get(dkey, 0.0) + mins
+
         if started is None:
             started = s
         s = s + use
         remaining -= use
 
         if remaining > dt.timedelta(0):
-            # ยังเหลือ ต้องข้ามไป window ถัดไป ⇒ คิด overhead
             total_ovh += ovh_td
-            cur_time = we  # ไปต่อจากท้าย window นี้
+            num_splits += 1
+            cur_time = we
         else:
             cur_time = s
             break
 
-    if remaining > dt.timedelta(0):
+    if remaining > dt.timedelta(0) or started is None:
         return None
-    return (started, cur_time + total_ovh, total_ovh.total_seconds() / 60.0)
+    return (started, cur_time + total_ovh, total_ovh.total_seconds()/60.0, num_splits, ot_minutes_by_day)
 
-def decode(ctx: Context, chrom: List[Dict[str, Any]]):
-    # ========= helper: pack across multiple windows when preemptable =========
-    def _pack_across_windows(
-        windows: List[Interval],
-        earliest: dt.datetime,
-        need_min: float,
-        *,
-        setup_min: float = 0.0,
-        preemption_overhead_min: float = 0.0
-    ) -> Optional[Tuple[dt.datetime, dt.datetime, float]]:
-        """
-        พยายามบรรจุงานลงหลาย window ต่อเนื่องหลัง earliest:
-        - วาง setup (ครั้งเดียว) ให้จบใน window ใด window หนึ่งก่อน
-        - ส่วน run ที่เหลือกระจายได้หลาย window
-        - คิด overhead ทุกครั้งที่เปลี่ยน window หลังจากเริ่ม run แล้ว
-        return: (start, finish, total_overhead_min) หรือ None ถ้าบรรจุไม่สำเร็จ
-        """
-        remaining = dt.timedelta(minutes=float(need_min))
-        setup_td  = dt.timedelta(minutes=float(setup_min))
-        ovh_td    = dt.timedelta(minutes=float(preemption_overhead_min))
+# ============================= Decode & Evaluate =============================
 
-        started: Optional[dt.datetime] = None
-        cur_time = earliest
-        total_ovh = dt.timedelta(0)
+def _auto_horizon_days(chrom: List[Dict[str, Any]]) -> int:
+    try:
+        rel = min(b['release_date'] for b in chrom)
+        due = max(b['due_date'] for b in chrom)
+        span_days = max(1, (due - rel).days) + 3
+        return max(7, min(span_days, 60))
+    except Exception:
+        return 14
 
-        for ws, we in windows:
-            s = max(ws, cur_time)
-            if s >= we:
-                continue
-
-            # วาง setup ให้จบใน window ใด window หนึ่งก่อน (ถ้ามี)
-            if setup_td > dt.timedelta(0):
-                if we - s >= setup_td:
-                    # วาง setup ตรงนี้
-                    if started is None:
-                        started = s
-                    s = s + setup_td
-                    remaining -= setup_td
-                    setup_td = dt.timedelta(0)
-                else:
-                    # ช่องนี้ใส่ setup ไม่พอ → ไป window ถัดไป
-                    continue
-
-            if remaining <= dt.timedelta(0):
-                break
-
-            usable = we - s
-            if usable <= dt.timedelta(0):
-                continue
-
-            use = min(usable, remaining)
-            if started is None:
-                started = s
-            s = s + use
-            remaining -= use
-
-            if remaining > dt.timedelta(0):
-                # ยังเหลือ → ต้องข้ามไป window ถัดไป ⇒ คิด overhead
-                total_ovh += ovh_td
-                cur_time = we
-            else:
-                cur_time = s
-                break
-
-        if remaining > dt.timedelta(0) or started is None:
-            return None
-        return (started, cur_time + total_ovh, total_ovh.total_seconds() / 60.0)
-
-    # ======================== main body of decode ============================
+def _schedule_once(ctx: Context, chrom: List[Dict[str, Any]], base_days: int, fail_stats: Dict[str, int]):
     schedule: List[Dict[str, Any]] = []
     skipped = 0
 
     machines_by_id = ctx.idx_machines_by_id
     machines_by_wc = ctx.idx_machines_by_wc
     wc_by_id = ctx.idx_wc
-    routing_by_id = ctx.idx_routings
 
     earliest_release = min((b['release_date'] for b in chrom), default=dt.datetime.now())
+    windows_by_machine = build_shift_windows(ctx, earliest_release, days=base_days)
 
-    machine_windows = build_shift_windows(ctx, earliest_release, days=14)
+    # OT cap
+    ot_used: Dict[Tuple[str, dt.date], float] = {}
+    cal = ctx.data.get("calendar", {}) or {}
+    cap_hours = cal.get("ot_cap_hours_per_day", None)
+    ot_cap_min: Optional[float] = None
+    if cap_hours is not None:
+        try:
+            ot_cap_min = float(cap_hours) * 60.0
+        except Exception:
+            ot_cap_min = None
 
+    # machine states
     machine_free: Dict[str, dt.datetime] = {m_id: earliest_release for m_id in machines_by_id.keys()}
     machine_state: Dict[str, str] = {m_id: machines_by_id[m_id].get('initial_state', 'clean') for m_id in machines_by_id.keys()}
 
-    for batch in chrom:
-        routing = routing_by_id.get(batch['routing_id'])
-        if not routing:
-            skipped += 1
-            continue
+    prefs = ctx.data.get("preference_settings", {}) or {}
+    allow_preempt = bool(prefs.get("allow_job_preemption", True))
+
+    def try_schedule_with_routing(batch: Dict[str, Any], routing: Dict[str, Any]):
+        temp_free = deepcopy(machine_free)
+        temp_state = deepcopy(machine_state)
+        temp_ot_used = deepcopy(ot_used)
+        steps: List[Dict[str, Any]] = []
 
         cur_start = max(batch['release_date'], earliest_release)
 
-        for op in routing.get('operations', []):
+        for op in routing.get('operations', []) or []:
             wc_id = op['work_center_id']
             candidates = list(machines_by_wc.get(wc_id, []))
             if not candidates:
@@ -641,88 +580,215 @@ def decode(ctx: Context, chrom: List[Dict[str, Any]]):
                     ids = set(wc.get('parallel_machines', []))
                     candidates = [machines_by_id[mid] for mid in ids if mid in machines_by_id]
             if not candidates:
-                skipped += 1
-                break
+                fail_stats['no_machine_in_wc'] += 1
+                return None  # infeasible
 
             best: Optional[Dict[str, Any]] = None
+            saw_no_window = True
+            saw_ot_cap = False
+            saw_no_contig = False
+            saw_pack_fail = False
+
             for mc in candidates:
                 mid = mc['machine_id']
-                wc = wc_by_id.get(wc_id)
-                est = max(cur_start, machine_free[mid])
+                est = max(cur_start, temp_free[mid])
 
-                # Policy flags (inherit: op > machine > work_center > False)
-                need_op_setup = _get_flag(op, mc, wc, "setup_requires_operator")
-                need_op_run   = _get_flag(op, mc, wc, "run_requires_operator")
-
-                prev_state = machine_state.get(mid, mc.get('initial_state', 'clean'))
+                prev_state = temp_state.get(mid, mc.get('initial_state', 'clean'))
                 next_state = op.get('setup_state_key', 'clean')
                 setup_min  = _lookup_matrix_setup_min(ctx, prev_state, next_state, mc, op)
                 machine_eff = float(mc.get('efficiency', 1.0) or 1.0)
                 proc_min   = _get_proc_time_min(ctx, op, batch['qty'], machine_id=mid, product_id=batch['product_id'], machine_eff=machine_eff)
                 need_min   = setup_min + proc_min
 
-                m_wins = machine_windows.get(mid, [(est, est + dt.timedelta(days=365))])
-                wins_to_search: List[Interval] = [(max(est, a), b) for (a, b) in m_wins]
+                wins = windows_by_machine.get(mid, [])
+                wins_to_search: List[Window] = [(max(est, a), b, k) for (a, b, k) in wins if b > est]
+                if wins_to_search:
+                    saw_no_window = False
 
-                is_preemptable = bool(op.get('preemptable', False))
+                is_preemptable = bool(op.get('preemptable', False)) and allow_preempt
                 preempt_ovh    = float(op.get('preemption_overhead_min', 0.0) or 0.0)
 
-                # ถ้า require operator และไม่ preemptable ⇒ ต้อง contiguous ใน window เดียว
-                require_full = bool((need_op_setup or need_op_run) and not is_preemptable)
-                slot = _find_slot_in_windows(wins_to_search, est, need_min, require_full_coverage=require_full)
-
                 cand: Optional[Dict[str, Any]] = None
+                ot_minutes_by_day: Dict[dt.date, float] = {}
 
-                if slot:
-                    st, fn = slot
-                    cand = {
-                        'machine': mid,
-                        'start': st,
-                        'finish': fn,
-                        'setup_min': setup_min,
-                        'proc_min': proc_min
-                    }
-                elif is_preemptable:
+                if not is_preemptable:
+                    cont = _find_slot_contiguous(wins_to_search, est, need_min)
+                    if cont:
+                        st, fn = cont
+                        ot_ok = True
+                        for ws, we, kind in wins_to_search:
+                            if kind != "OT":
+                                continue
+                            seg_s = max(ws, st)
+                            seg_e = min(we, fn)
+                            if seg_e > seg_s:
+                                per_day = _split_minutes_by_day(seg_s, seg_e)
+                                for dkey, mins in per_day.items():
+                                    ot_minutes_by_day[dkey] = ot_minutes_by_day.get(dkey, 0.0) + mins
+                        if ot_cap_min is not None:
+                            for dkey, mins in ot_minutes_by_day.items():
+                                used = temp_ot_used.get((mid, dkey), 0.0)
+                                if used + mins > ot_cap_min + 1e-9:
+                                    ot_ok = False
+                                    saw_ot_cap = True
+                                    break
+                        if ot_ok:
+                            cand = {
+                                'machine': mid, 'start': st, 'finish': fn,
+                                'setup_min': setup_min, 'proc_min': proc_min, 'splits': 0,
+                                'ot_usage': ot_minutes_by_day
+                            }
+                    else:
+                        saw_no_contig = True
+                else:
                     packed = _pack_across_windows(
                         wins_to_search, est, need_min,
                         setup_min=setup_min,
                         preemption_overhead_min=preempt_ovh
                     )
                     if packed:
-                        st, fn, ovh_min = packed
-                        cand = {
-                            'machine': mid,
-                            'start': st,
-                            'finish': fn,
-                            'setup_min': setup_min,
-                            'proc_min': proc_min + ovh_min  # บวก overhead เข้าเวลารวมของ run
-                        }
+                        st, fn, ovh_min, splits, ot_minutes_by_day = packed
+                        ot_ok = True
+                        if ot_cap_min is not None:
+                            for dkey, mins in ot_minutes_by_day.items():
+                                used = temp_ot_used.get((mid, dkey), 0.0)
+                                if used + mins > ot_cap_min + 1e-9:
+                                    ot_ok = False
+                                    saw_ot_cap = True
+                                    break
+                        if ot_ok:
+                            cand = {
+                                'machine': mid, 'start': st, 'finish': fn,
+                                'setup_min': setup_min, 'proc_min': proc_min + ovh_min,
+                                'splits': int(splits), 'ot_usage': ot_minutes_by_day
+                            }
+                    else:
+                        saw_pack_fail = True
 
                 if cand is not None and ((best is None) or (cand['finish'] < best['finish'])):
                     best = cand
 
             if best is None:
-                skipped += 1
-                break
+                if saw_no_window:
+                    fail_stats['no_window_after_est'] += 1
+                elif saw_ot_cap:
+                    fail_stats['ot_cap_hit'] += 1
+                elif saw_no_contig:
+                    fail_stats['no_contiguous_window'] += 1
+                elif saw_pack_fail:
+                    fail_stats['cannot_pack_across'] += 1
+                else:
+                    fail_stats['unknown_fit_fail'] += 1
+                return None  # infeasible for this routing
 
-            schedule.append({
+            steps.append({
+                'batch_id': batch.get('batch_id', ''),
                 'order_id': batch['order_id'],
                 'product_id': batch['product_id'],
-                'routing_id': batch['routing_id'],
+                'routing_id': routing['routing_id'],
                 'operation': op['name'],
                 'qty': batch['qty'],
                 'machine': best['machine'],
                 'start': best['start'],
                 'finish': best['finish'],
                 'setup_min': best['setup_min'],
-                'proc_min': best['proc_min']
+                'proc_min': best['proc_min'],
+                'splits': best.get('splits', 0)
             })
-
-            machine_free[best['machine']] = best['finish']
-            machine_state[best['machine']] = op.get('setup_state_key', 'clean')
+            for dkey, mins in (best.get('ot_usage') or {}).items():
+                temp_ot_used[(best['machine'], dkey)] = temp_ot_used.get((best['machine'], dkey), 0.0) + mins
+            temp_free[best['machine']] = best['finish']
+            temp_state[best['machine']] = op.get('setup_state_key', 'clean')
             cur_start = best['finish']
 
+        final_finish = steps[-1]['finish'] if steps else cur_start
+        return {
+            "steps": steps,
+            "finish": final_finish,
+            "temp_free": temp_free,
+            "temp_state": temp_state,
+            "temp_ot_used": temp_ot_used
+        }
+
+    for batch in chrom:
+        cands = product_routing_candidates(ctx, batch['product_id'])
+        if not cands:
+            fail_stats['no_routing_for_product'] += 1
+            skipped += 1
+            continue
+
+        best_plan = None
+        for routing in cands:
+            plan = try_schedule_with_routing(batch, routing)
+            if plan is None:
+                continue
+            if (best_plan is None) or (plan["finish"] < best_plan["finish"]):
+                best_plan = plan
+
+        if best_plan is None:
+            skipped += 1
+            continue
+
+        schedule.extend(best_plan["steps"])
+        machine_free = best_plan["temp_free"]
+        machine_state = best_plan["temp_state"]
+        ot_used = best_plan["temp_ot_used"]
+
     return {'schedule': schedule, 'skipped': skipped}
+
+def decode(ctx: Context, chrom: List[Dict[str, Any]]):
+    # ✅ กันตกชั้นที่ 1: กรอง None / ชนิดที่ไม่ใช่ dict
+    orig_len = len(chrom)
+    chrom = [b for b in chrom if isinstance(b, dict)]
+
+    # ✅ กันตกชั้นที่ 2: กรอง batch ที่ไม่ครบคีย์สำคัญ
+    REQUIRED_KEYS = ("order_id", "product_id", "qty", "release_date", "due_date")
+    def _valid(b: Dict[str, Any]) -> bool:
+        try:
+            return all(k in b for k in REQUIRED_KEYS)
+        except Exception:
+            return False
+
+    chrom = [b for b in chrom if _valid(b)]
+    skipped_pre = orig_len - len(chrom)
+    if not chrom:
+        return {'schedule': [], 'skipped': skipped_pre, 'fail_stats': {}}
+
+    # horizon พื้นฐาน + fallback ขยายอัตโนมัติ
+    base_days = _auto_horizon_days(chrom)
+
+    best_decoded = None
+    best_tuple = None  # (skipped, makespan)
+
+    fail_stats_all: Dict[str, int] = defaultdict(int)
+
+    for add_days in (0, 7, 14):  # ✅ ลองขยายกรอบเวลา 0 / +7 / +14 วัน
+        fail_stats = defaultdict(int)
+        decoded = _schedule_once(ctx, chrom, base_days + add_days, fail_stats)
+
+        # ranking: น้อย skipped กว่า → ดีกว่า, ถ้าเท่ากัน เปรียบ makespan
+        skipped = decoded['skipped']
+        if decoded['schedule']:
+            makespan = max(s['finish'] for s in decoded['schedule'])
+        else:
+            makespan = dt.datetime.max
+
+        rank = (skipped, makespan)
+        if (best_tuple is None) or (rank < best_tuple):
+            best_tuple = rank
+            best_decoded = decoded
+            # เก็บสถิติจากรอบที่ดีที่สุด
+            fail_stats_all = fail_stats
+
+        # ถ้าจัดครบแล้ว ไม่ต้องลองเพิ่มวัน
+        if skipped == 0:
+            break
+
+    # รวม skipped จากการกรองช่วงต้นด้วย
+    out = best_decoded or {'schedule': [], 'skipped': 0}
+    out['skipped'] = out.get('skipped', 0) + skipped_pre
+    out['fail_stats'] = dict(fail_stats_all)
+    return out
 
 def evaluate(ctx: Context, decoded: Dict[str, Any]) -> float:
     schedule = decoded['schedule']
@@ -734,13 +800,14 @@ def evaluate(ctx: Context, decoded: Dict[str, Any]) -> float:
     makespan = max(s['finish'] for s in schedule)
     start0 = min(s['start'] for s in schedule)
 
-    # tardiness by order (use last finish per order)
     last_finish_by_order: Dict[str, dt.datetime] = {}
     for s in schedule:
-        last_finish_by_order[s['order_id']] = max(last_finish_by_order.get(s['order_id'], s['finish']), s['finish'])
+        last_finish_by_order[s['order_id']] = max(
+            last_finish_by_order.get(s['order_id'], s['finish']), s['finish']
+        )
 
     tardiness_min = 0.0
-    all_orders = list(ctx.data.get('orders', [])) + list(ctx.data.get('orders_multiline', []))
+    all_orders = list(ctx.data.get('orders', []))
     due_by_order = {o['order_id']: parse_datetime(o['due_date']) for o in all_orders}
     for oid, fin in last_finish_by_order.items():
         due = due_by_order.get(oid)
@@ -755,11 +822,10 @@ def evaluate(ctx: Context, decoded: Dict[str, Any]) -> float:
     obj += w.get('tardiness', 10.0) * tardiness_min
     setup_cost = sum(s.get('setup_min', 0.0) for s in schedule)
     obj += w.get('setup_cost', 5.0) * setup_cost
-
-    # heavy penalty on skipped ops
+    num_splits_total = sum(int(s.get('splits', 0)) for s in schedule)
+    obj += w.get('preemption_cost', 0.0) * float(num_splits_total)
     obj += 1e6 * skipped
     return obj
-
 
 # ============================= GA + Local Search =============================
 
@@ -768,29 +834,47 @@ def random_chromosome(batches: List[Dict[str, Any]]):
     random.shuffle(chrom)
     return chrom
 
+def _chrom_key_item(b):
+    return (b.get('batch_id',''), b['order_id'], b['product_id'], b['qty'],
+            b['release_date'].isoformat(), b['due_date'].isoformat())
+
+def _normalize_chromosome(chrom, ref_pool=None):
+    out = [x for x in chrom if isinstance(x, dict)]
+    if ref_pool is None:
+        return out
+
+    used = set(_chrom_key_item(b) for b in out)
+    for b in ref_pool:
+        k = _chrom_key_item(b)
+        if k not in used:
+            out.append(b)
+            used.add(k)
+    return out
 
 def crossover(p1, p2):
-    if len(p1) < 2 or len(p2) < 2:
-        return deepcopy(p1)
     n = len(p1)
+    if n < 2:
+        return deepcopy(p1)
+
     a, b = sorted(random.sample(range(n), 2))
-    child = [None]*n
-    child[a:b+1] = deepcopy(p1[a:b+1])
+    child = [None] * n
 
-    def key(b):
-        return (b['order_id'], b['product_id'], b['qty'], b['routing_id'], b['release_date'].isoformat(), b['due_date'].isoformat())
+    mid_slice = [deepcopy(x) for x in p1[a:b+1]]
+    child[a:b+1] = mid_slice
+    used = set(_chrom_key_item(x) for x in mid_slice)
 
-    used = set(key(x) for x in child[a:b+1] if x is not None)
-    idx = (b+1) % n
+    idx = (b + 1) % n
     for item in p2:
-        k = key(item)
+        k = _chrom_key_item(item)
         if k in used:
             continue
         while child[idx] is not None:
             idx = (idx + 1) % n
         child[idx] = deepcopy(item)
-    return child
+        used.add(k)
 
+    child = _normalize_chromosome(child, ref_pool=p1)
+    return child
 
 def mutate(chrom, rate=0.2):
     c = deepcopy(chrom)
@@ -801,8 +885,9 @@ def mutate(chrom, rate=0.2):
         c[i], c[j] = c[j], c[i]
     return c
 
+def local_search(ctx: Context, chrom, iterations=20, tabu_size=6, temp_start=800):
+    chrom = _normalize_chromosome(chrom)
 
-def local_search(ctx: Context, chrom, iterations=50, tabu_size=10, temp_start=1000):
     best_chrom = deepcopy(chrom)
     best_obj = evaluate(ctx, decode(ctx, best_chrom))
     tabu: List[Tuple] = []
@@ -810,12 +895,14 @@ def local_search(ctx: Context, chrom, iterations=50, tabu_size=10, temp_start=10
     alpha = 0.95
     for _ in range(iterations):
         neighbor = mutate(best_chrom, rate=0.3)
-        sig = tuple((x['order_id'], x['product_id'], x['qty']) for x in neighbor)
+        neighbor = _normalize_chromosome(neighbor, ref_pool=chrom)
+
+        sig = tuple((x.get('batch_id',''), x['order_id'], x['product_id'], x['qty']) for x in neighbor)
         if sig in tabu:
             continue
         obj = evaluate(ctx, decode(ctx, neighbor))
         delta = obj - best_obj
-        if delta < 0 or random.random() < math.exp(-delta / temp):
+        if delta < 0 or random.random() < math.exp(-delta / max(temp, 1e-9)):
             best_chrom = neighbor
             best_obj = obj
             tabu.append(sig)
@@ -824,19 +911,21 @@ def local_search(ctx: Context, chrom, iterations=50, tabu_size=10, temp_start=10
         temp *= alpha
     return best_chrom
 
-
-def ga_scheduler(ctx: Context, batches, population=30, generations=20):
-    pop = [random_chromosome(batches) for _ in range(population)]
+def ga_scheduler(ctx: Context, batches, population=18, generations=12):
+    pop = [_normalize_chromosome(random_chromosome(batches), ref_pool=batches) for _ in range(population)]
     best_chrom = pop[0]
     best_obj = evaluate(ctx, decode(ctx, best_chrom))
+
     for gen in range(generations):
         new_pop = []
         for _ in range(population):
             p1, p2 = random.sample(pop, 2)
             child = crossover(p1, p2)
             child = mutate(child)
-            child = local_search(ctx, child, iterations=20, tabu_size=5)
+            child = _normalize_chromosome(child, ref_pool=batches)
+            child = local_search(ctx, child, iterations=20, tabu_size=6)
             new_pop.append(child)
+
         for chrom in new_pop:
             obj = evaluate(ctx, decode(ctx, chrom))
             if obj < best_obj:
@@ -844,16 +933,18 @@ def ga_scheduler(ctx: Context, batches, population=30, generations=20):
                 best_obj = obj
         pop = new_pop
         print(f"Generation {gen+1}/{generations}, best_obj={best_obj:.2f}")
-    decoded = decode(ctx, best_chrom)
-    return decoded['schedule']
 
+    decoded = decode(ctx, best_chrom)
+    return decoded
 
 # ============================= Printing helpers =============================
 
 def to_printable_row(s: Dict[str, Any]):
     return {
+        "batch_id": s.get('batch_id', ''),
         "order_id": s['order_id'],
         "product_id": s['product_id'],
+        "routing_id": s.get('routing_id', ''),
         "operation": s['operation'],
         "qty": s['qty'],
         "machine": s['machine'],
@@ -861,23 +952,26 @@ def to_printable_row(s: Dict[str, Any]):
         "finish": s['finish'].strftime("%Y-%m-%d %H:%M"),
         "setup_min": round(s.get('setup_min', 0.0), 2),
         "proc_min": round(s.get('proc_min', 0.0), 2),
+        "splits": int(s.get('splits', 0)),
     }
-
 
 # ============================= Main =============================
 if __name__ == "__main__":
     random.seed(42)
 
-    data = load_data("/mnt/data/mock.json")
+    data = load_data("./mock_without_operator.json")
     ctx = Context.from_data(data)
 
-    orders_all = normalize_orders_for_batching(data)
+    orders_all = list(data.get('orders', []))
     batches = build_batches(ctx, orders_all)
     if not batches:
-        print("No batches generated. Please check orders/products/routings in mock.json")
+        print("No batches generated. Please check orders/products/routings in json")
         raise SystemExit(1)
 
-    final_schedule = ga_scheduler(ctx, batches, population=20, generations=10)
+    decoded = ga_scheduler(ctx, batches, population=18, generations=12)
+    final_schedule = decoded['schedule']
+    fail_stats = decoded.get('fail_stats', {})
+    skipped = decoded.get('skipped', 0)
 
     print("\n=== FINAL SCHEDULE (console only) ===")
     printable = [to_printable_row(r) for r in final_schedule]
@@ -889,19 +983,22 @@ if __name__ == "__main__":
     else:
         print("(empty)")
 
-    from collections import defaultdict
+    # Group by machine
     by_machine: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in final_schedule:
         dur_min = r.get("setup_min", 0.0) + r.get("proc_min", 0.0)
         by_machine[r["machine"]].append({
+            "batch_id": r.get("batch_id",""),
             "order_id": r["order_id"],
             "product_id": r["product_id"],
+            "routing_id": r.get("routing_id",""),
             "operation": r["operation"],
             "qty": r["qty"],
             "start": r["start"].strftime("%Y-%m-%d %H:%M"),
             "finish": r["finish"].strftime("%Y-%m-%d %H:%M"),
             "setup_min": round(r.get("setup_min", 0.0), 2),
             "proc_min": round(r.get("proc_min", 0.0), 2),
+            "splits": int(r.get("splits", 0)),
             "duration_min": round(dur_min, 2)
         })
 
@@ -912,7 +1009,7 @@ if __name__ == "__main__":
     for m_id, rows in sorted(by_machine.items()):
         rows.sort(key=lambda x: _p(x["start"]))
         print(f"\n--- Machine: {m_id} ---")
-        header = ["order_id","product_id","operation","qty","start","finish","setup_min","proc_min","duration_min"]
+        header = ["batch_id","order_id","product_id","routing_id","operation","qty","start","finish","setup_min","proc_min","splits","duration_min"]
         print(",".join(header))
         for r in rows:
             print(",".join(str(r[h]) for h in header))
@@ -924,7 +1021,21 @@ if __name__ == "__main__":
             continue
         first_start = _p(rows_sorted[0]["start"])
         last_finish = _p(rows_sorted[-1]["finish"])
-        horizon_min = (last_finish - first_start).total_seconds()/60.0
+        horizon_min = max((last_finish - first_start).total_seconds()/60.0, 1e-9)
         busy_min = sum(r["duration_min"] for r in rows_sorted)
-        util = (busy_min / horizon_min) if horizon_min > 0 else 0.0
+        busy_min = min(busy_min, horizon_min)
+        util = (busy_min / horizon_min)
         print(f"{m_id}: busy={busy_min:.1f} min, horizon={horizon_min:.1f} min, util={util*100:.1f}%")
+
+    print("\n=== COVERAGE (by batch_id) ===")
+    total_batches = len(set(b.get('batch_id','') for b in batches))
+    scheduled_batches = len(set(s.get('batch_id','') for s in final_schedule))
+    missed = sorted(set(b.get('batch_id','') for b in batches) - set(s.get('batch_id','') for s in final_schedule))
+    print(f"scheduled={scheduled_batches}/{total_batches}")
+    if missed:
+        print("MISSED BATCH_IDs:", ", ".join(missed))
+
+    if fail_stats:
+        print("\n=== FAIL STATS (decode reasons) ===")
+        for k, v in sorted(fail_stats.items(), key=lambda x: (-x[1], x[0])):
+            print(f"{k}: {v}")

@@ -18,6 +18,8 @@
     "dayjs": "^1.11.18",
     "express": "^5.1.0",
     "lodash": "^4.17.21",
+    "node-fetch": "^2.7.0",
+    "ollama": "^0.6.0",
     "sqlite3": "^5.1.7"
   },
   "devDependencies": {
